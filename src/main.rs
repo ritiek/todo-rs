@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
 use mongodb::{
     bson::doc,
-    results::{InsertOneResult, UpdateResult},
+    results::{DeleteResult, InsertOneResult, UpdateResult},
     sync::{Client, Collection},
 };
 use serde::{Deserialize, Serialize};
@@ -69,9 +69,9 @@ impl Note {
             self.title,
             self.description,
             if self.completed {
-                "Task marked as completed!"
+                "Completed"
             } else {
-                "Task Pending"
+                "Pending"
             },
             created_on_fmt,
         )
@@ -112,6 +112,13 @@ fn mark_note_task_as_completed(
     )
 }
 
+fn delete_note_task(
+    collection: &mut Collection<Note>,
+    note_id: i32,
+) -> mongodb::error::Result<DeleteResult> {
+    collection.delete_one(doc! { "_id": note_id }, None)
+}
+
 fn add_note_to(collection: &mut Collection<Note>) -> mongodb::error::Result<InsertOneResult> {
     let saved_notes = collection.find(None, None)?;
     let id = saved_notes.count() + 1;
@@ -130,35 +137,42 @@ fn add_note_to(collection: &mut Collection<Note>) -> mongodb::error::Result<Inse
 
 fn main() -> mongodb::error::Result<()> {
     let client = Client::with_uri_str(DB_CONNECTION_URI)?;
-
     // Ping the server to see if you can connect to the cluster
     client
         .database("admin")
         .run_command(doc! {"ping": 1}, None)?;
     println!("Connected to MongoDB successfully.\n");
 
-    let mut collection = client.database(DB_NAME).collection::<Note>(COLLECTION_NAME);
-
-    let choices = vec!["show".to_string(), "add".to_string()];
+    let choices = vec!["mark".to_string(), "add".to_string(), "del".to_string()];
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 || !choices.contains(&args[1]) {
         eprintln!("Please pass one argument from {:?}.", choices);
         process::exit(1);
     }
+    let mut collection = client.database(DB_NAME).collection::<Note>(COLLECTION_NAME);
 
     match args[1].as_str() {
-        "show" => {
+        "mark" => {
             show_saved_notes_from(&collection)?;
             println!("Which Note task ID would you like to mark as completed?");
             let note_id: i32 = read_line_from_stdin()
                 .parse()
                 .expect("Note ID must be a number");
             mark_note_task_as_completed(&mut collection, note_id)?;
-            println!("Note marked as completed!");
+            println!("Task marked as completed!");
         }
         "add" => {
             add_note_to(&mut collection)?;
-            println!("Your todo note was saved!");
+            println!("Your task was saved!");
+        }
+        "del" => {
+            show_saved_notes_from(&collection)?;
+            println!("Which Note task ID would you like to delete?");
+            let note_id: i32 = read_line_from_stdin()
+                .parse()
+                .expect("Note ID must be a number");
+            delete_note_task(&mut collection, note_id)?;
+            println!("Task deleted successfully!");
         }
         _ => {}
     };
