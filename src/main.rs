@@ -1,17 +1,24 @@
 use chrono::{DateTime, Local};
 use mongodb::{
     bson::doc,
-    results::InsertOneResult,
+    results::{InsertOneResult, UpdateResult},
     sync::{Client, Collection},
 };
 use serde::{Deserialize, Serialize};
-// use std::io::{self, BufRead};
+use std::{
+    env,
+    io::{self, BufRead},
+    process,
+};
 
+const DB_CONNECTION_URI: &str = "mongodb://localhost:27017";
 const DB_NAME: &str = "todo-rs";
 const COLLECTION_NAME: &str = "notes";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Note {
+    #[serde(rename = "_id")]
+    pub id: i32,
     pub title: String,
     pub description: String,
     pub completed: bool,
@@ -21,11 +28,17 @@ pub struct Note {
 impl Note {
     pub fn new() -> Self {
         Self {
+            id: 0,
             title: "".to_string(),
             description: "".to_string(),
             completed: false,
             created_on: Local::now(),
         }
+    }
+
+    pub fn with_id(mut self, id: i32) -> Self {
+        self.id = id;
+        self
     }
 
     pub fn with_title(mut self, title: String) -> Self {
@@ -40,6 +53,7 @@ impl Note {
 
     pub fn create(self) -> Result<Self, ()> {
         Ok(Self {
+            id: self.id,
             title: self.title,
             description: self.description,
             completed: self.completed,
@@ -50,8 +64,16 @@ impl Note {
     pub fn summarize(&self) -> String {
         let created_on_fmt = self.created_on.format("%d/%m/%Y @ %I:%M:%S %p");
         format!(
-            "{}\n{}\n(Created on {})",
-            self.title, self.description, created_on_fmt
+            "ID: {}\nTitle: {}\nDescription: {}\n[Status: {}]\n(Created on: {})",
+            self.id,
+            self.title,
+            self.description,
+            if self.completed {
+                "Task marked as completed!"
+            } else {
+                "Task Pending"
+            },
+            created_on_fmt,
         )
     }
 
@@ -59,57 +81,87 @@ impl Note {
         &self,
         collection: &mut Collection<Self>,
     ) -> mongodb::error::Result<InsertOneResult> {
-        Ok(collection.insert_one(self, None)?)
+        collection.insert_one(self, None)
     }
 }
 
+fn read_line_from_stdin() -> String {
+    let stdin = io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line).unwrap();
+    line.trim().to_string()
+}
+
+fn show_saved_notes_from(collection: &Collection<Note>) -> mongodb::error::Result<()> {
+    let saved_notes = collection.find(None, None)?;
+    println!("Summary of all saved todo Notes:\n");
+    for saved_note in saved_notes {
+        println!("{}\n", saved_note?.summarize());
+    }
+    Ok(())
+}
+
+fn mark_note_task_as_completed(
+    collection: &mut Collection<Note>,
+    note_id: i32,
+) -> mongodb::error::Result<UpdateResult> {
+    collection.update_one(
+        doc! { "_id": note_id },
+        doc! { "$set": { "completed": true } },
+        None,
+    )
+}
+
+fn add_note_to(collection: &mut Collection<Note>) -> mongodb::error::Result<InsertOneResult> {
+    let saved_notes = collection.find(None, None)?;
+    let id = saved_notes.count() + 1;
+    println!("Enter a title for the todo note:");
+    let title = read_line_from_stdin();
+    println!("Enter a description for the todo note:");
+    let description = read_line_from_stdin();
+    Note::new()
+        .with_id(id as i32)
+        .with_title(title)
+        .with_description(description)
+        .create()
+        .unwrap()
+        .save_to(collection)
+}
+
 fn main() -> mongodb::error::Result<()> {
-    let db_connection_uri = "mongodb://localhost:27017";
-    let client = Client::with_uri_str(db_connection_uri)?;
+    let client = Client::with_uri_str(DB_CONNECTION_URI)?;
 
     // Ping the server to see if you can connect to the cluster
     client
         .database("admin")
         .run_command(doc! {"ping": 1}, None)?;
-    println!("Connected successfully.\n");
+    println!("Connected to MongoDB successfully.\n");
 
     let mut collection = client.database(DB_NAME).collection::<Note>(COLLECTION_NAME);
 
-    // let mut test_note = Note::from_title("Test Note".to_string());
-    // test_note.with_description("this is a sample test note".to_string());
-    let test_note = Note::new()
-        .with_title("Test Note".to_string())
-        .with_description("this is a sample test note".to_string())
-        .create()
-        .unwrap();
-
-    // println!("{}\n", test_note.summarize());
-    // let result = test_note.save_to(&mut collection)?;
-    // println!("{:?}\n", result);
-
-    // println!("Todo app");
-    // let choices = vec!["read"];
-    // let stdin = io::stdin();
-    // for line in stdin.lock().lines() {
-    //     println!("{}", line.unwrap());
-    // }
-
-    // let note_from_rust_driver = collection.find_one(doc! { "title": "Note from Rust driver" }, None)?;
-    // let note_from_rust_driver = collection.find(doc! { "title": "Note from Rust driver" }, None)?;
-    // let note_from_rust_driver = collection.find(None, None)?;
-
-    let saved_notes = collection.find(None, None)?;
-    // println!("{:#?}", saved_notes);
-    println!("Summary all saved notes:\n");
-    for saved_note in saved_notes {
-        let doc = saved_note?;
-        println!("{}\n", doc.summarize());
+    let choices = vec!["show".to_string(), "add".to_string()];
+    let args: Vec<String> = env::args().collect();
+    if args.len() < 2 || !choices.contains(&args[1]) {
+        eprintln!("Please pass one argument from {:?}.", choices);
+        process::exit(1);
     }
 
-    // collection.insert_many(docs, None);
+    match args[1].as_str() {
+        "show" => {
+            show_saved_notes_from(&collection)?;
+            println!("Which Note task ID would you like to mark as completed?");
+            let note_id: i32 = read_line_from_stdin()
+                .parse()
+                .expect("Note ID must be a number");
+            mark_note_task_as_completed(&mut collection, note_id)?;
+            println!("Note marked as completed!");
+        }
+        "add" => {
+            add_note_to(&mut collection)?;
+            println!("Your todo note was saved!");
+        }
+        _ => {}
+    };
 
-    // for collection_name in db.list_collection_names(None)? {
-    //     println!("{}", collection_name);
-    // }
     Ok(())
 }
